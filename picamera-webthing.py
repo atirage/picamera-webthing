@@ -11,6 +11,8 @@ import tornado.web
 import io
 from asyncio import sleep, Event, get_event_loop
 
+PATH_JPG = '/media/screenshots/snapshot.jpg'
+
 class StreamHandler(tornado.web.RequestHandler):
     async def get(self):
         #self.set_header('Cache-Control', 'no-store', no-cache, must-revalidate, pre-check=0, post-check=0, max-age=0')
@@ -18,13 +20,12 @@ class StreamHandler(tornado.web.RequestHandler):
         #self.set_header('Connection', 'close')
         self.set_header('Content-Type', 'multipart/x-mixed-replace;boundary=--jpgboundary')
         await self.flush()
-        self.served_image_timestamp = time.time()
         my_boundary = "--jpgboundary\r\n"
         while True:
             # Generating images for mjpeg stream and wraps them into http resp
             await new_frame.wait()
             new_frame.clear()
-            with io.open('/media/screenshots/snapshot.jpg', 'rb') as f:
+            with io.open(PATH_JPG, 'rb') as f:
                 img = f.read()
             self.write(my_boundary)
             self.flush()
@@ -39,7 +40,24 @@ class StreamHandler(tornado.web.RequestHandler):
                 #print(self.served_image_timestamp)
             except tornado.iostream.StreamClosedError as err:
                 #print(err.real_error)
-                pass
+                break
+
+class SnapshotHandler(tornado.web.RequestHandler):
+    async def get(self):
+        self.set_header('Content-type', 'image/jpeg')
+        await new_frame.wait()
+        new_frame.clear()
+        with io.open(PATH_JPG, 'rb') as f:
+            img = f.read()
+        self.set_header('Content-length', str(len(img)))
+        self.write(img)
+        self.served_image_timestamp = time.time()
+        try:
+            await self.flush()
+            #print(self.served_image_timestamp)
+        except tornado.iostream.StreamClosedError as err:
+            #print(err.real_error)
+            pass
 
 class StreamOutput(object):
     def __init__(self):
@@ -48,7 +66,7 @@ class StreamOutput(object):
     def write(self, buf):
         if buf.startswith(b'\xff\xd8'):
             # Start of new frame, reopen
-            self.snapshot = io.open('/media/screenshots/snapshot.jpg', 'wb')
+            self.snapshot = io.open(PATH_JPG, 'wb')
         self.snapshot.write(buf)
         if buf.endswith(b'\xff\xd9'):
             #self.snapshot.close()
@@ -78,18 +96,18 @@ class PiCameraThing(Thing):
                                 'links': [
                                          {
                                             'rel': 'alternate',
-                                            'href': '/media/screenshots/snapshot.jpg',
+                                            'href': '/media/snapshot',
                                             'mediaType': 'image/jpeg'
                                          }
                                          ]
                                 }))
-        self.stream_active = Value(False)
-        self.add_property(
-            Property(self, 'streamActive', self.stream_active,
-                    metadata = {
-                                'title': 'Streaming',
-                                'type': 'boolean',
-                                }))
+        #self.stream_active = Value(False)
+        #self.add_property(
+        #    Property(self, 'streamActive', self.stream_active,
+        #            metadata = {
+        #                        'title': 'Streaming',
+        #                        'type': 'boolean',
+        #                        }))
         self.stream = Value(None)
         self.add_property(
             Property(self, 'stream', self.stream,
@@ -139,9 +157,8 @@ if __name__ == '__main__':
                                                     StreamHandler
                                                 ),
                                                 (
-                                                    r'/media/screenshots/(.*)',
-                                                    tornado.web.StaticFileHandler,
-                                                    {'path': '/media/screenshots/'},
+                                                    r'/media/snapshot',
+                                                    SnapshotHandler
                                                 )])
     try:
         syslog.syslog('Starting the Webthing server on: ' + str(server.hosts))
