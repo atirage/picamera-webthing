@@ -2,155 +2,60 @@
 
 #!/usr/bin/env python3
 
-from asyncio import sleep, CancelledError, get_event_loop
 from webthing import (Action, Event, Property, Value, SingleThing, Thing, WebThingServer)
 import picamera
-import io
 import threading
 import time
 import syslog
-import base64
+import tornado.web
+import io
+from asyncio import sleep, Event, get_event_loop
 
-#import os
-#import uuid
-#import sys
-#import platform
-#import datetime
+class StreamHandler(tornado.web.RequestHandler):
+    async def get(self):
+        #self.set_header('Cache-Control', 'no-store', no-cache, must-revalidate, pre-check=0, post-check=0, max-age=0')
+        #self.set_header('Pragma', 'no-cache')
+        #self.set_header('Connection', 'close')
+        self.set_header('Content-Type', 'multipart/x-mixed-replace;boundary=--jpgboundary')
+        await self.flush()
+        self.served_image_timestamp = time.time()
+        my_boundary = "--jpgboundary\r\n"
+        while True:
+            # Generating images for mjpeg stream and wraps them into http resp
+            await new_frame.wait()
+            new_frame.clear()
+            with io.open('/media/screenshots/snapshot.jpg', 'rb') as f:
+                img = f.read()
+            self.write(my_boundary)
+            self.flush()
+            self.set_header('Content-type', 'image/jpeg')
+            self.set_header('Content-length', str(len(img)))
+            self.write("\r\n")
+            self.write(img)
+            self.write("\r\n\r\n")
+            self.served_image_timestamp = time.time()
+            try:
+                await self.flush()
+                #print(self.served_image_timestamp)
+            except tornado.iostream.StreamClosedError as err:
+                #print(err.real_error)
+                pass
 
-class MyPiCamera:
-    """A wrapper class for raspberry pi camera"""
-
+class StreamOutput(object):
     def __init__(self):
+        self.snapshot = None
 
-        self.device_name = "picam"
-        # pi camera settings
-        self.use_video_port = False
-        #self.framerate = 1.0
-        self.iso = 0
-        self.rotation = 0
-        self.shutter_speed = 0
-        self.sensor_mode = 3
-        self.exposure_mode = "auto"
-        self.resolution = (1024, 768)
-        self.camera = picamera.PiCamera()
-        self.camera_setup()
-
-    def cleanup(self):
-        self.camera.stop_preview()
-        self.camera.close()
-
-    def camera_setup(self):
-
-        self.camera_lock = threading.Lock()
-
-        with self.camera_lock:
-            self.camera.resolution = self.resolution
-            self.camera.rotation = self.rotation
-            self.camera.iso = self.iso
-            """
-                We set the framerate to 30.0 at startup so the firmware has at
-                least 90 frames (30 * 3 seconds) to use for calibrating the sensor,
-                which is critical in low light. May need to do this periodically
-                as well; if the framerate is set very low the camera will take
-                several minutes or longer to react to lighting changes
-            """
-            #self.camera.framerate = 30.0
-            #self.camera.shutter_speed = self.shutter_speed
-            #self.camera.sensor_mode = self.sensor_mode
-            #self.camera.exposure_mode = self.exposure_mode
-            # may not be necessary, night mode seems to do it automatically
-            #self.camera.framerate_range = (0.1, self.framerate)
-            self.camera.start_preview()
-
-        syslog.syslog('Waiting for camera module warmup...')
-        """
-            Give the camera firmware a chance to calibrate the sensor, critical
-            for low light
-        """
-        time.sleep(3)
-
-        #with self.camera_lock:
-        """
-                now set the framerate back to the configured value
-        """
-            #self.camera.framerate = self.framerate
-
-    def get_still_image(self, path):
-        """
-            This uses base64 for the image data so the gateway doesn't have to do
-            anything but pass it to the `img` tag using the well known inline syntax
-        """
-        #_image_stream = io.BytesIO()
-        syslog.syslog("Capturing image ...")#, self.use_video_port)
-
-        with self.camera_lock:
-            # image quality higher than 10 tends to make large images with no
-            # meaningful quality improvement.
-            #cap_start = time.time()
-            #self.camera.capture(path, format = 'jpeg', quality = 10, thumbnail = None, use_video_port = self.use_video_port)
-            self.camera.capture(path, format = 'jpeg', use_video_port = self.use_video_port)
+    def write(self, buf):
+        if buf.startswith(b'\xff\xd8'):
+            # Start of new frame, reopen
+            self.snapshot = io.open('/media/screenshots/snapshot.jpg', 'wb')
+        self.snapshot.write(buf)
+        if buf.endswith(b'\xff\xd9'):
+            #self.snapshot.close()
+            _loop.call_soon_threadsafe(new_frame.set)
             
-            #cap_end = time.time()
-            #logger.debug("Capture took %f seconds", (cap_end - cap_start))
-
-        #_image_stream.seek(0)
-        #image = base64.b64encode(_image_stream.getvalue())
-        #_image_stream.close()
-        #return image
-
-    def get_resolution(self):
-        """
-            This formats the resolution as WxH, which the picamera API will actually
-            accept when setting the value in set_resolution(), so it works out
-            quite well as we can pass resolution back and forth all the way up
-            to the Gateway interface as-is without any further parsing or
-            formatting
-        """
-        with self.camera_lock:
-            _width, _height = self.camera.resolution
-        resolution = "{}x{}".format(_width, _height)
-        return resolution
-
-    def set_resolution(self, resolution):
-        with self.camera_lock:
-            try:
-                self.camera.resolution = resolution
-                self.resolution = resolution
-                return True
-            except Exception as e:
-                syslog.syslog("Failed to set resolution")
-                return False
-
-    def get_framerate(self):
-        with self.camera_lock:
-            _fr = float(self.camera.framerate)
-        framerate = "{}".format(_fr)
-        return framerate
-
-    def set_framerate(self, framerate):
-        with self.camera_lock:
-            try:
-                self.camera.framerate = framerate
-                self.framerate = framerate
-                return True
-            except Exception as e:
-                syslog.syslog("Failed to set framerate")
-                return False
-
-    def get_exposure_mode(self):
-        with self.camera_lock:
-            _ex = self.camera.exposure_mode
-        return _ex
-
-    def set_exposure_mode(self, exposure_mode):
-        with self.camera_lock:
-            try:
-                self.camera.exposure_mode = exposure_mode
-                self.exposure_mode = exposure_mode
-                return True
-            except Exception as e:
-                syslog.syslog("Failed to set exposure mode")
-                return False
+    def close(self):
+        self.snapshot.close()
 
 class PiCameraThing(Thing):
     """A web connected Pi Camera"""
@@ -158,11 +63,11 @@ class PiCameraThing(Thing):
         Thing.__init__(self,
                        'urn:dev:ops:my-picam-thing-1234',
                        'My PiCamera Thing',
-                       ['Camera'],#[VideoCamera],
+                       ['VideoCamera'],
                        'A web connected Pi Camera')
-        self.picam = MyPiCamera()
-        
-        self.still_img = Value("")
+        self.terminated = False
+        self.picam = picamera.PiCamera(resolution='720p', framerate=30)
+        self.still_img = Value(None)
         self.add_property(
             Property(self, 'snapshot', self.still_img,
                     metadata = {
@@ -173,41 +78,76 @@ class PiCameraThing(Thing):
                                 'links': [
                                          {
                                             'rel': 'alternate',
-                                            'href': '/home/pi/picamera-webthing/screenshots/snapshot.jpg',
+                                            'href': '/media/screenshots/snapshot.jpg',
                                             'mediaType': 'image/jpeg'
                                          }
                                          ]
                                 }))
-        syslog.syslog('Starting the camera update loop')
-        self.picam_task = get_event_loop().create_task(self.update_PiCam())
+        self.stream_active = Value(False)
+        self.add_property(
+            Property(self, 'streamActive', self.stream_active,
+                    metadata = {
+                                'title': 'Streaming',
+                                'type': 'boolean',
+                                }))
+        self.stream = Value(None)
+        self.add_property(
+            Property(self, 'stream', self.stream,
+                metadata = {
+                            '@type': 'VideoProperty',
+                            'title': 'Stream',
+                            'type' : 'null',
+                            'readOnly': True,
+                            'links': [
+                                     {
+                                        'rel': 'alternate',
+                                        'href': '/media/stream',
+                                        'mediaType': 'video/x-jpeg'
+                                     }
+                                     ]
+                            }))
+        syslog.syslog('Starting the camera')
+        self.cam_thr = threading.Thread(target=self.start_PiCam, args=())
+        self.cam_thr.start()
     
-    async def update_PiCam(self):
-        while True:
-            try:
-                self.picam.get_still_image('/home/pi/picamera-webthing/screenshots/snapshot.jpg')
-                #if self.still_img is not None and image is not None:
-                #    self.ioloop.add_callback(self.base64_still_image_value.notify_of_external_update,
-                #                             image.decode('utf-8'))
-            except Exception as e:
-                #print(e)
-                syslog.syslog('Exception occured while updating image property')
-            wait_interval = 10.0# / float(self.picam.framerate)
-            #syslog.syslog("Camera sleeping for %.2f (fps: %.2f)", wait_interval, float(self.framerate))
+    def start_PiCam(self):
+        try:
+            self.picam.start_preview()
+            # Give the camera some warm-up time
+            time.sleep(2)
+            output = StreamOutput()
+            self.picam.start_recording(output, format='mjpeg')
+        except:    
+           syslog.syslog('Error setting up recording!')
+        while not self.terminated:
+            self.picam.wait_recording(2)
+        self.picam.stop_recording()
+        output.close()
 
-            await sleep(wait_interval)
-
-    def cancel_tasks(self):
-        self.picam_task.cancel()
-        get_event_loop().run_until_complete(self.picam_task)
+global _loop, new_frame
 
 if __name__ == '__main__':
+    
+    _loop = get_event_loop()
+    new_frame = Event()
+
     picamera_web_thing = PiCameraThing()
-    server = WebThingServer(SingleThing(picamera_web_thing), port=8900)
+    server = WebThingServer(SingleThing(picamera_web_thing), 
+                            port=8900, 
+                            additional_routes=[ (   
+                                                    r'/media/stream', 
+                                                    StreamHandler
+                                                ),
+                                                (
+                                                    r'/media/screenshots/(.*)',
+                                                    tornado.web.StaticFileHandler,
+                                                    {'path': '/media/screenshots/'},
+                                                )])
     try:
         syslog.syslog('Starting the Webthing server on: ' + str(server.hosts))
         server.start()
     except KeyboardInterrupt:
-        picamera_web_thing.cancel_tasks()
-        picamera_web_thing.picam.camera.stop()
+        picamera_web_thing.terminated = True
+        picamera_web_thing.cam_thr.join()
     finally:
-        picamera_web_thing.picam.cleanup()
+        pass
