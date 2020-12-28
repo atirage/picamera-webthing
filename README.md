@@ -4,7 +4,7 @@ A WebThing compatible Pi Camera server, for example to be used with the WebThing
 
 ## Screenshots (of the Gateway, `picamera-webthing` itself has no UI)
 
-![Gateway with Pi Camera Thing added](/screenshots/gateway.png?raw=true "Gateway with Pi Camera Thing added")
+![Gateway with Pi Camera Thing added](/screenshots/gateway.jpg?raw=true "Gateway with Pi Camera Thing added")
 
 ## Features
 
